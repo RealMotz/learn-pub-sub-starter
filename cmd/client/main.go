@@ -10,73 +10,45 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Acktype {
-	return func(ps routing.PlayingState) pubsub.Acktype {
-		defer fmt.Print("> ")
-		gs.HandlePause(ps)
-		return pubsub.Ack
+func subscribeToPauseQueue(conn *amqp.Connection, gs *gamelogic.GameState, username string) {
+	err := pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilDirect,
+		routing.PauseKey+"."+username, // queueName
+		routing.PauseKey,              // key
+		pubsub.Transient,              // exchange type
+		handlerPause(gs),
+	)
+	if err != nil {
+		log.Fatalf("could not subscribe to pause: %v", err)
 	}
 }
 
-func handlerPlayerMove(gs *gamelogic.GameState, channel *amqp.Channel) func(gamelogic.ArmyMove) pubsub.Acktype {
-	return func(move gamelogic.ArmyMove) pubsub.Acktype {
-		defer fmt.Print("> ")
-		outcome := gs.HandleMove(move)
-		switch outcome {
-		case gamelogic.MoveOutcomeSamePlayer:
-			return pubsub.Ack
-		case gamelogic.MoveOutComeSafe:
-			return pubsub.Ack
-		case gamelogic.MoveOutcomeMakeWar:
-			err := pubsub.PublishJSON(
-				channel,
-				routing.ExchangePerilTopic,
-				routing.WarRecognitionsPrefix+"."+gs.GetUsername(),
-				gamelogic.RecognitionOfWar{
-					Attacker: move.Player,
-					Defender: gs.GetPlayerSnap(),
-				},
-			)
-			if err != nil {
-				return pubsub.NackRequeue
-			}
-			return pubsub.Ack
-		default:
-			return pubsub.NackDiscard
-		}
+func subscribeToMoveQueue(conn *amqp.Connection, gs *gamelogic.GameState, channel *amqp.Channel, username string) {
+	err := pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilTopic,
+		routing.ArmyMovesPrefix+"."+username, // queueName
+		routing.ArmyMovesPrefix+".*",         // key
+		pubsub.Transient,                     // exchange type
+		handlerPlayerMove(gs, channel),
+	)
+	if err != nil {
+		log.Fatalf("could not subscribe to army moves: %v", err)
 	}
 }
 
-func handlerWar(gs *gamelogic.GameState, channel *amqp.Channel) func(gamelogic.RecognitionOfWar) pubsub.Acktype {
-	return func(rw gamelogic.RecognitionOfWar) pubsub.Acktype {
-		defer fmt.Print("> ")
-		outcome, winner, loser := gs.HandleWar(rw)
-		var ack pubsub.Acktype
-		var msg string
-
-		switch outcome {
-		case gamelogic.WarOutcomeNotInvolved:
-			return pubsub.NackRequeue
-		case gamelogic.WarOutcomeNoUnits:
-			return pubsub.NackDiscard
-		case gamelogic.WarOutcomeOpponentWon:
-			ack = pubsub.Ack
-			msg = fmt.Sprintf("%s won a against %s", winner, loser)
-		case gamelogic.WarOutcomeYouWon:
-			ack = pubsub.Ack
-			msg = fmt.Sprintf("%s won a against %s", winner, loser)
-		case gamelogic.WarOutcomeDraw:
-			ack = pubsub.Ack
-			msg = fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser)
-		default:
-			fmt.Println("Unhandled war outcome...")
-			return pubsub.NackDiscard
-		}
-
-		key := routing.GameLogSlug + "." + rw.Attacker.Username
-		pubsub.PublishGob(channel, routing.ExchangePerilTopic, key, msg)
-
-		return ack
+func subscribeToWarQueue(conn *amqp.Connection, gs *gamelogic.GameState, channel *amqp.Channel, username string) {
+	err := pubsub.SubscribeJSON(
+		conn,
+		routing.ExchangePerilTopic,
+		routing.WarRecognitionsPrefix,      // queueName
+		routing.WarRecognitionsPrefix+".*", // key
+		pubsub.Durable,                     // exchange type
+		handlerWar(gs, channel),
+	)
+	if err != nil {
+		log.Fatalf("could not subscribe to : %v", err)
 	}
 }
 
@@ -97,56 +69,21 @@ func main() {
 		log.Fatal(err)
 	}
 
-	queueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
 	channel, _, err := pubsub.DeclareAndBind(
 		conn,
 		routing.ExchangePerilDirect,
-		queueName,        // queueName
-		routing.PauseKey, // key
-		pubsub.Transient, // exchange type
+		routing.PauseKey+"."+username, // queueName
+		routing.PauseKey,              // key
+		pubsub.Transient,              // exchange type
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	gamestate := gamelogic.NewGameState(username)
-	err = pubsub.SubscribeJSON(
-		conn,
-		routing.ExchangePerilDirect,
-		queueName,
-		routing.PauseKey,
-		pubsub.Transient,
-		handlerPause(gamestate),
-	)
-	if err != nil {
-		log.Fatalf("could not subscribe to pause: %v", err)
-	}
-
-	prefix := "army_moves"
-	armyMoveQueueName := prefix + "." + username
-	err = pubsub.SubscribeJSON(
-		conn,
-		routing.ExchangePerilTopic,
-		armyMoveQueueName, // queueName
-		prefix+".*",       // key
-		pubsub.Transient,  // exchange type
-		handlerPlayerMove(gamestate, channel),
-	)
-	if err != nil {
-		log.Fatalf("could not subscribe to army moves: %v", err)
-	}
-
-	err = pubsub.SubscribeJSON(
-		conn,
-		routing.ExchangePerilTopic,
-		routing.WarRecognitionsPrefix,      // queueName
-		routing.WarRecognitionsPrefix+".*", // key
-		pubsub.Durable,                     // exchange type
-		handlerWar(gamestate, channel),
-	)
-	if err != nil {
-		log.Fatalf("could not subscribe to : %v", err)
-	}
+	subscribeToPauseQueue(conn, gamestate, username)
+	subscribeToMoveQueue(conn, gamestate, channel, username)
+	subscribeToWarQueue(conn, gamestate, channel, username)
 
 	for {
 		cmd := gamelogic.GetInput()
@@ -168,7 +105,7 @@ func main() {
 			err = pubsub.PublishJSON(
 				channel,
 				routing.ExchangePerilTopic,
-				armyMoveQueueName,
+				routing.ArmyMovesPrefix+"."+username,
 				mv,
 			)
 			if err != nil {
