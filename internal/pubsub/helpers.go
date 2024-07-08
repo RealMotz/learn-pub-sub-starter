@@ -113,11 +113,6 @@ func SubscribeJSON[T any](
 	simpleQueueType int,
 	handler func(T) Acktype,
 ) error {
-	// channel, _, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
-	// if err != nil {
-	// 	return err
-	// }
-
 	unmarshal := func(data []byte) (T, error) {
 		var out T
 		err := json.Unmarshal(data, &out)
@@ -130,31 +125,6 @@ func SubscribeJSON[T any](
 	}
 
 	return subscribe(conn, exchange, queueName, key, simpleQueueType, handler, unmarshal)
-
-	// var messages <-chan amqp.Delivery
-	// messages, err = channel.Consume(queueName, "", false, false, false, false, nil)
-	// go func() {
-	// 	defer channel.Close()
-	// 	for msg := range messages {
-	// 		var out T
-	// 		err := json.Unmarshal(msg.Body, &out)
-	// 		if err != nil {
-	// 			fmt.Printf("Error unmarshaling message: %v", err)
-	// 		}
-	// 		fmt.Println(out)
-	// 		ack := handler(out)
-
-	// 		if ack == NackDiscard {
-	// 			msg.Nack(false, false)
-	// 		} else if ack == NackRequeue {
-	// 			msg.Nack(false, true)
-	// 		} else {
-	// 			msg.Ack(false)
-	// 		}
-	// 	}
-	// }()
-
-	// return nil
 }
 
 func subscribe[T any](
@@ -172,7 +142,14 @@ func subscribe[T any](
 	}
 
 	var messages <-chan amqp.Delivery
+	err = channel.Qos(10, 0, false)
+	if err != nil {
+		return err
+	}
 	messages, err = channel.Consume(queueName, "", false, false, false, false, nil)
+	if err != nil {
+		return err
+	}
 	go func() {
 		defer channel.Close()
 		for msg := range messages {

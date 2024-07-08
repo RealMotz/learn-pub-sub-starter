@@ -57,7 +57,6 @@ func main() {
 		pubsub.Durable,
 	)
 	if err != nil {
-		fmt.Println("this?")
 		log.Fatalf("Could not bind channel to queue: %v", err)
 	}
 
